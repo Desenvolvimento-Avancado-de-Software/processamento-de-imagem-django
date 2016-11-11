@@ -6,70 +6,112 @@ import urllib
 import json
 import cv2
 import os
+import sys
 
+from IPython.display import clear_output # to clear command output when this notebook gets too cluttered
+
+home_dir = os.getenv("HOME")
+caffe_root = os.path.join(home_dir, 'caffe')  # this file should be run from {caffe_root}/examples (otherwise change this line)
+sys.path.insert(0, os.path.join(caffe_root, 'python'))
+
+import caffe
 # define the path to the face detector
 FACE_DETECTOR_PATH = "{base_path}/cascades/haarcascade_frontalface_default.xml".format(
 	base_path=os.path.abspath(os.path.dirname(__file__)))
 
 @csrf_exempt
 def detect(request):
-	# initialize the data dictionary to be returned by the request
 	data = {"success": False}
 
-	# check to see if this is a post request
 	if request.method == "POST":
-		# check to see if an image was uploaded
 		if request.FILES.get("image", None) is not None:
-			# grab the uploaded image
 			image = _grab_image(stream=request.FILES["image"])
 
-		# otherwise, assume that a URL was passed in
 		else:
-			# grab the URL from the request
 			url = request.POST.get("url", None)
-			# if the URL is None, then return an error
 			if url is None:
 				data["error"] = "No URL provided."
 				return JsonResponse(data)
 
-			# load the image and convert
 			image = _grab_image(url=url)
 
-		# convert the image to grayscale, load the face cascade detector,
-		# and detect faces in the image
 		face_cascade = cv2.CascadeClassifier(FACE_DETECTOR_PATH)
 		image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 		rects = face_cascade.detectMultiScale(image, 1.3, 5)
-		# construct a list of bounding boxes from the detection
 		rects = [(int(x), int(y), int(x + w), int(y + h)) for (x, y, w, h) in rects]
 
-		# update the data dictionary with the faces detected
 		data.update({"num_faces": len(rects), "faces": rects, "success": True})
 
-	# return a JSON response
+	#caffe
+	if os.path.isfile(caffe_root + 'models/bvlc_reference_caffenet/bvlc_reference_caffenet.caffemodel'):
+		print 'CaffeNet found.'
+	else:
+		print 'Downloading pre-trained CaffeNet model...'
+		#!~/caffe/scripts/download_model_binary.py ~/caffe/models/bvlc_reference_caffenet
+
+	caffe.set_mode_cpu()
+
+	model_def = os.path.join(caffe_root, 'models', 'bvlc_reference_caffenet','deploy.prototxt')
+	model_weights = os.path.join(caffe_root, 'models','bvlc_reference_caffenet','bvlc_reference_caffenet.caffemodel')
+
+	net = caffe.Net(model_def,      # defines the structure of the model
+                model_weights,  # contains the trained weights
+                caffe.TEST)     # use test mode (e.g., don't perform dropout)
+
+	mu = np.load(os.path.join(caffe_root, 'python','caffe','imagenet','ilsvrc_2012_mean.npy'))
+	mu = mu.mean(1).mean(1)  # average over pixels to obtain the mean (BGR) pixel values
+
+	# create transformer for the input called 'data'
+	transformer = caffe.io.Transformer({'data': net.blobs['data'].data.shape})
+
+	transformer.set_transpose('data', (2,0,1))  # move image channels to outermost dimension
+	transformer.set_mean('data', mu)            # subtract the dataset-mean value in each channel
+	transformer.set_raw_scale('data', 255)      # rescale from [0, 1] to [0, 255]
+	transformer.set_channel_swap('data', (2,1,0))  # swap channels from RGB to BGR
+
+	# set the size of the input (we can skip this if we're happy
+	#  with the default; we can also change it later, e.g., for different batch sizes)
+	net.blobs['data'].reshape(50,        # batch size
+	                          3,         # 3-channel (BGR) images
+	                          227, 227)  # image size is 227x227
+
+	image_caffe = caffe.io.load_image(_grab_caffe_image(url=url))
+	transformed_image = transformer.preprocess('data', image_caffe)
+
+	# copy the image data into the memory allocated for the net
+	net.blobs['data'].data[...] = transformed_image
+	### perform classification
+	output = net.forward()
+
+	output_prob = output['prob'][0]  # the output probability vector for the first image in the batch
+		# load ImageNet labels
+	labels_file = os.path.join(caffe_root, 'data','ilsvrc12','synset_words.txt')
+	#if not os.path.exists(labels_file):
+	    #!~/caffe/data/ilsvrc12/get_ilsvrc_aux.sh
+
+	labels = np.loadtxt(labels_file, str, delimiter='\t')
+
+	data.update({"probability": labels[output_prob.argmax()]})
+
 	return JsonResponse(data)
 
 def _grab_image(path=None, stream=None, url=None):
-	# if the path is not None, then load the image from disk
 	if path is not None:
 		image = cv2.imread(path)
 
-	# otherwise, the image does not reside on disk
 	else:
-		# if the URL is not None, then download the image
 		if url is not None:
 			resp = urllib.urlopen(url)
 			data = resp.read()
 
-
-		# if the stream is not None, then the image has been uploaded
 		elif stream is not None:
 			data = stream.read()
 
-		# convert the image to a NumPy array and then read it into
-		# OpenCV format
 		arr = np.asarray(bytearray(data), dtype="uint8")
 		image = cv2.imdecode(arr,-1)
 
-	# return the image
 	return image
+
+def _grab_caffe_image(url=None):
+	resp = urllib.urlopen(url)
+	return resp
