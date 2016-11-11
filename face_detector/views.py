@@ -28,20 +28,58 @@ def detect(request):
 			image = _grab_image(stream=request.FILES["image"])
 
 		else:
-			url = request.POST.get("url", None)
-			if url is None:
+			urls = request.POST.getlist("url")
+			if urls is None:
 				data["error"] = "No URL provided."
 				return JsonResponse(data)
 
+		faces = []
+		for url in urls:
 			image = _grab_image(url=url)
 
-		face_cascade = cv2.CascadeClassifier(FACE_DETECTOR_PATH)
-		image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-		rects = face_cascade.detectMultiScale(image, 1.3, 5)
-		rects = [(int(x), int(y), int(x + w), int(y + h)) for (x, y, w, h) in rects]
+			face_cascade = cv2.CascadeClassifier(FACE_DETECTOR_PATH)
+			image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+			rects = face_cascade.detectMultiScale(image, 1.3, 5)
+			rects = [(int(x), int(y), int(x + w), int(y + h)) for (x, y, w, h) in rects]
 
-		data.update({"num_faces": len(rects), "faces": rects, "success": True})
+			data = dict()
+			data["num_faces"]=len(rects)
+			data["faces"]=rects
+			data["success"]=True
+			probability_response = _grab_probability(url)
+			data['probabilities'] = probability_response
 
+			faces.append(data)
+			print 'x'
+			print faces
+
+		print urls
+
+	return JsonResponse(faces, safe=False)
+
+def _grab_image(path=None, stream=None, url=None):
+	if path is not None:
+		image = cv2.imread(path)
+
+	else:
+		if url is not None:
+			resp = urllib.urlopen(url)
+			data = resp.read()
+
+		elif stream is not None:
+			data = stream.read()
+
+		arr = np.asarray(bytearray(data), dtype="uint8")
+		image = cv2.imdecode(arr,-1)
+
+	return image
+
+def _grab_caffe_image(url=None):
+	resp = urllib.urlopen(url)
+	return resp
+
+
+def _grab_probability(url=None):
 	#caffe
 	if os.path.isfile(caffe_root + 'models/bvlc_reference_caffenet/bvlc_reference_caffenet.caffemodel'):
 		print 'CaffeNet found.'
@@ -55,8 +93,8 @@ def detect(request):
 	model_weights = os.path.join(caffe_root, 'models','bvlc_reference_caffenet','bvlc_reference_caffenet.caffemodel')
 
 	net = caffe.Net(model_def,      # defines the structure of the model
-                model_weights,  # contains the trained weights
-                caffe.TEST)     # use test mode (e.g., don't perform dropout)
+	            model_weights,  # contains the trained weights
+	            caffe.TEST)     # use test mode (e.g., don't perform dropout)
 
 	mu = np.load(os.path.join(caffe_root, 'python','caffe','imagenet','ilsvrc_2012_mean.npy'))
 	mu = mu.mean(1).mean(1)  # average over pixels to obtain the mean (BGR) pixel values
@@ -91,27 +129,6 @@ def detect(request):
 
 	labels = np.loadtxt(labels_file, str, delimiter='\t')
 
-	data.update({"probability": labels[output_prob.argmax()]})
+	probability_response = labels[output_prob.argmax()]
 
-	return JsonResponse(data)
-
-def _grab_image(path=None, stream=None, url=None):
-	if path is not None:
-		image = cv2.imread(path)
-
-	else:
-		if url is not None:
-			resp = urllib.urlopen(url)
-			data = resp.read()
-
-		elif stream is not None:
-			data = stream.read()
-
-		arr = np.asarray(bytearray(data), dtype="uint8")
-		image = cv2.imdecode(arr,-1)
-
-	return image
-
-def _grab_caffe_image(url=None):
-	resp = urllib.urlopen(url)
-	return resp
+	return probability_response
